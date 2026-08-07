@@ -23,25 +23,43 @@ export const App: React.FC = () => {
   };
 
   const fetchAllData = async () => {
+    let connected = false;
+
     try {
-      const [resClip, resImg, resLnk, resHealth] = await Promise.all([
-        fetch('/api/clipboard').then((r) => r.json()),
-        fetch('/api/images').then((r) => r.json()),
-        fetch('/api/links').then((r) => r.json()),
-        fetch('/api/health').then((r) => r.json()).catch(() => ({ status: 'off' })),
-      ]);
-
-      if (Array.isArray(resClip)) setClipboardItems(resClip);
-      if (Array.isArray(resImg)) setDeletedImages(resImg);
-      if (Array.isArray(resLnk)) setAccessedLinks(resLnk);
-
-      if (resHealth.status === 'ok') {
-        setApiHealth('Auto-Capture Engine Online');
-      } else {
-        setApiHealth('Modo Local Híbrido');
+      const resClip = await fetch('/api/clipboard').then((r) => r.json()).catch(() => null);
+      if (Array.isArray(resClip) && resClip.length > 0) {
+        setClipboardItems(resClip);
+        connected = true;
       }
-    } catch (err) {
-      setApiHealth('Conectando ao Container Backend...');
+    } catch (e) {}
+
+    try {
+      const resImg = await fetch('/api/images').then((r) => r.json()).catch(() => null);
+      if (Array.isArray(resImg) && resImg.length > 0) {
+        setDeletedImages(resImg);
+        connected = true;
+      }
+    } catch (e) {}
+
+    try {
+      const resLnk = await fetch('/api/links').then((r) => r.json()).catch(() => null);
+      if (Array.isArray(resLnk) && resLnk.length > 0) {
+        setAccessedLinks(resLnk);
+        connected = true;
+      }
+    } catch (e) {}
+
+    try {
+      const resHealth = await fetch('/api/health').then((r) => r.json()).catch(() => null);
+      if (resHealth && resHealth.status === 'ok') {
+        connected = true;
+      }
+    } catch (e) {}
+
+    if (connected) {
+      setApiHealth('Auto-Capture Engine Online');
+    } else {
+      setApiHealth('Modo Local Híbrido Ativo');
     }
   };
 
