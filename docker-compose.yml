@@ -29,6 +29,7 @@ services:
       - "5000:5000"
     environment:
       PORT: 5000
+      DATABASE_URL: "postgresql://pglyph_user:pglyph_pass@postgres:5432/pglyph_db?schema=public"
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USER: pglyph_user
