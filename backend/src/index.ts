@@ -1,6 +1,8 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { generateSeedClipboard, generateSeedImages, generateSeedLinks } from './seedData';
 import { SystemWatcher } from './systemWatcher';
@@ -14,6 +16,32 @@ const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// Diretorio e utilitarios de persistencia local de fallback
+const STORAGE_DIR = path.join(__dirname, '../.storage');
+if (!fs.existsSync(STORAGE_DIR)) {
+  try { fs.mkdirSync(STORAGE_DIR, { recursive: true }); } catch (e) {}
+}
+const CLIP_FILE = path.join(STORAGE_DIR, 'clipboard.json');
+const IMG_FILE = path.join(STORAGE_DIR, 'images.json');
+const LNK_FILE = path.join(STORAGE_DIR, 'links.json');
+
+function loadLocalFile<T>(filePath: string, fallback: T): T {
+  try {
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed as T;
+    }
+  } catch (e) {}
+  return fallback;
+}
+
+function saveLocalFile(filePath: string, data: any) {
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (e) {}
+}
+
 // Lista de clientes conectados ao Server-Sent Events (SSE) para atualização em tempo real
 let sseClients: Response[] = [];
 
@@ -24,14 +52,83 @@ function broadcastEvent(type: 'clipboard' | 'image' | 'link', payload: any) {
   });
 }
 
+// Fallback de memória carregado dos arquivos persistentes locais
+let memoryClipboard = loadLocalFile(CLIP_FILE, generateSeedClipboard());
+let memoryImages = loadLocalFile(IMG_FILE, generateSeedImages());
+let memoryLinks = loadLocalFile(LNK_FILE, generateSeedLinks());
+
+// Rotinas de Expurgo Automático mantendo no máximo os 100 registros mais recentes
+async function pruneClipboard() {
+  try {
+    const allClips = await prisma.clipboardItem.findMany({
+      select: { id: true, isPinned: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (allClips.length > 100) {
+      const toDelete = allClips.slice(100).filter((item) => !item.isPinned).map((item) => item.id);
+      if (toDelete.length > 0) {
+        await prisma.clipboardItem.deleteMany({
+          where: { id: { in: toDelete } },
+        });
+      }
+    }
+  } catch (e) {}
+
+  if (memoryClipboard.length > 100) {
+    const pinned = memoryClipboard.filter((item: any) => item.isPinned);
+    const unpinned = memoryClipboard.filter((item: any) => !item.isPinned);
+    memoryClipboard = [...unpinned.slice(0, 100 - Math.min(pinned.length, 100)), ...pinned].slice(0, 100);
+  }
+  saveLocalFile(CLIP_FILE, memoryClipboard);
+}
+
+async function pruneImages() {
+  try {
+    const allImgs = await prisma.deletedImage.findMany({
+      select: { id: true },
+      orderBy: { deletedAt: 'desc' },
+    });
+    if (allImgs.length > 100) {
+      const toDelete = allImgs.slice(100).map((item) => item.id);
+      if (toDelete.length > 0) {
+        await prisma.deletedImage.deleteMany({
+          where: { id: { in: toDelete } },
+        });
+      }
+    }
+  } catch (e) {}
+
+  if (memoryImages.length > 100) {
+    memoryImages = memoryImages.slice(0, 100);
+  }
+  saveLocalFile(IMG_FILE, memoryImages);
+}
+
+async function pruneLinks() {
+  try {
+    const allLinks = await prisma.accessedLink.findMany({
+      select: { id: true, isBookmarked: true },
+      orderBy: { lastVisitedAt: 'desc' },
+    });
+    if (allLinks.length > 100) {
+      const toDelete = allLinks.slice(100).filter((item) => !item.isBookmarked).map((item) => item.id);
+      if (toDelete.length > 0) {
+        await prisma.accessedLink.deleteMany({
+          where: { id: { in: toDelete } },
+        });
+      }
+    }
+  } catch (e) {}
+
+  if (memoryLinks.length > 100) {
+    memoryLinks = memoryLinks.slice(0, 100);
+  }
+  saveLocalFile(LNK_FILE, memoryLinks);
+}
+
 // Inicializa o monitoramento automático de imagens deletadas no PC
 const systemWatcher = new SystemWatcher(prisma, broadcastEvent);
 systemWatcher.start();
-
-// Fallback de memória
-let memoryClipboard = generateSeedClipboard();
-let memoryImages = generateSeedImages();
-let memoryLinks = generateSeedLinks();
 
 async function autoMigrateDatabase() {
   try {
@@ -154,6 +251,10 @@ async function ensureSeeded() {
         });
       }
     }
+
+    saveLocalFile(CLIP_FILE, memoryClipboard);
+    saveLocalFile(IMG_FILE, memoryImages);
+    saveLocalFile(LNK_FILE, memoryLinks);
   } catch (err) {
     console.warn('⚠️ Aviso ao sincronizar com PostgreSQL via Prisma:', err instanceof Error ? err.message : err);
   }
@@ -217,11 +318,13 @@ app.post('/api/clipboard', async (req: Request, res: Response) => {
         restoredCount: newItem.restoredCount,
       },
     });
-    memoryClipboard.unshift(saved as any);
+    memoryClipboard = [saved as any, ...memoryClipboard.filter((i: any) => i.id !== saved.id)];
+    await pruneClipboard();
     broadcastEvent('clipboard', saved);
     return res.status(201).json(saved);
   } catch (e) {
-    memoryClipboard.unshift(newItem as any);
+    memoryClipboard = [newItem as any, ...memoryClipboard.filter((i: any) => i.id !== newItem.id)];
+    await pruneClipboard();
     broadcastEvent('clipboard', newItem);
     return res.status(201).json(newItem);
   }
@@ -239,6 +342,7 @@ app.post('/api/clipboard/:id/restore', async (req: Request, res: Response) => {
     const idx = memoryClipboard.findIndex((item) => item.id === id);
     if (idx !== -1) {
       memoryClipboard[idx].restoredCount += 1;
+      saveLocalFile(CLIP_FILE, memoryClipboard);
       return res.json(memoryClipboard[idx]);
     }
     return res.status(404).json({ error: 'Item não encontrado' });
@@ -260,6 +364,7 @@ app.put('/api/clipboard/:id/pin', async (req: Request, res: Response) => {
     const idx = memoryClipboard.findIndex((item) => item.id === id);
     if (idx !== -1) {
       memoryClipboard[idx].isPinned = !memoryClipboard[idx].isPinned;
+      saveLocalFile(CLIP_FILE, memoryClipboard);
       return res.json(memoryClipboard[idx]);
     }
   }
@@ -270,9 +375,9 @@ app.delete('/api/clipboard/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.clipboardItem.delete({ where: { id } });
-  } catch (e) {
-    memoryClipboard = memoryClipboard.filter((item) => item.id !== id);
-  }
+  } catch (e) {}
+  memoryClipboard = memoryClipboard.filter((item) => item.id !== id);
+  saveLocalFile(CLIP_FILE, memoryClipboard);
   res.json({ message: 'Item removido com sucesso' });
 });
 
@@ -305,6 +410,7 @@ app.post('/api/images/:id/restore', async (req: Request, res: Response) => {
     if (idx !== -1) {
       memoryImages[idx].isRestored = true;
       memoryImages[idx].restoredAt = now;
+      saveLocalFile(IMG_FILE, memoryImages);
       return res.json(memoryImages[idx]);
     }
     return res.status(404).json({ error: 'Imagem não encontrada' });
@@ -315,9 +421,9 @@ app.delete('/api/images/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.deletedImage.delete({ where: { id } });
-  } catch (e) {
-    memoryImages = memoryImages.filter((item) => item.id !== id);
-  }
+  } catch (e) {}
+  memoryImages = memoryImages.filter((item) => item.id !== id);
+  saveLocalFile(IMG_FILE, memoryImages);
   res.json({ message: 'Imagem excluída permanentemente' });
 });
 
@@ -364,11 +470,13 @@ app.post('/api/links', async (req: Request, res: Response) => {
 
   try {
     const saved = await prisma.accessedLink.create({ data: newItem });
-    memoryLinks.unshift(saved as any);
+    memoryLinks = [saved as any, ...memoryLinks.filter((i: any) => i.id !== saved.id)];
+    await pruneLinks();
     broadcastEvent('link', saved);
     return res.status(201).json(saved);
   } catch (e) {
-    memoryLinks.unshift(newItem as any);
+    memoryLinks = [newItem as any, ...memoryLinks.filter((i: any) => i.id !== newItem.id)];
+    await pruneLinks();
     broadcastEvent('link', newItem);
     return res.status(201).json(newItem);
   }
@@ -389,6 +497,7 @@ app.put('/api/links/:id/bookmark', async (req: Request, res: Response) => {
     const idx = memoryLinks.findIndex((item) => item.id === id);
     if (idx !== -1) {
       memoryLinks[idx].isBookmarked = !memoryLinks[idx].isBookmarked;
+      saveLocalFile(LNK_FILE, memoryLinks);
       return res.json(memoryLinks[idx]);
     }
   }
@@ -399,9 +508,9 @@ app.delete('/api/links/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.accessedLink.delete({ where: { id } });
-  } catch (e) {
-    memoryLinks = memoryLinks.filter((item) => item.id !== id);
-  }
+  } catch (e) {}
+  memoryLinks = memoryLinks.filter((item) => item.id !== id);
+  saveLocalFile(LNK_FILE, memoryLinks);
   res.json({ message: 'Link removido do histórico' });
 });
 
@@ -441,6 +550,10 @@ app.post('/api/seed', async (_req: Request, res: Response) => {
     await prisma.accessedLink.deleteMany({});
     await ensureSeeded();
   } catch (e) {}
+
+  saveLocalFile(CLIP_FILE, memoryClipboard);
+  saveLocalFile(IMG_FILE, memoryImages);
+  saveLocalFile(LNK_FILE, memoryLinks);
 
   res.json({ message: '100 itens gerados com sucesso para cada uma das 3 seções do Pglyph Restaurador!' });
 });

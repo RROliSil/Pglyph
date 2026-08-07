@@ -28,30 +28,24 @@ export const App: React.FC = () => {
     try {
       const resClip = await fetch('/api/clipboard').then((r) => r.json()).catch(() => null);
       if (Array.isArray(resClip)) {
-        if (resClip.length > 0) {
-          setClipboardItems(resClip);
-          connected = true;
-        }
+        setClipboardItems(resClip.slice(0, 100));
+        connected = true;
       }
     } catch (e) {}
 
     try {
       const resImg = await fetch('/api/images').then((r) => r.json()).catch(() => null);
       if (Array.isArray(resImg)) {
-        if (resImg.length > 0) {
-          setDeletedImages(resImg);
-          connected = true;
-        }
+        setDeletedImages(resImg.slice(0, 100));
+        connected = true;
       }
     } catch (e) {}
 
     try {
       const resLnk = await fetch('/api/links').then((r) => r.json()).catch(() => null);
       if (Array.isArray(resLnk)) {
-        if (resLnk.length > 0) {
-          setAccessedLinks(resLnk);
-          connected = true;
-        }
+        setAccessedLinks(resLnk.slice(0, 100));
+        connected = true;
       }
     } catch (e) {}
 

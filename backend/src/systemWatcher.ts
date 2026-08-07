@@ -73,6 +73,15 @@ export class SystemWatcher {
     try {
       const saved = await this.prisma.deletedImage.create({ data: imageItem as any });
       this.broadcast('image', saved);
+
+      const allImgs = await this.prisma.deletedImage.findMany({
+        select: { id: true },
+        orderBy: { deletedAt: 'desc' },
+      });
+      if (allImgs.length > 100) {
+        const toDelete = allImgs.slice(100).map((i) => i.id);
+        await this.prisma.deletedImage.deleteMany({ where: { id: { in: toDelete } } });
+      }
     } catch (e) {
       this.broadcast('image', imageItem);
     }
@@ -105,6 +114,15 @@ export class SystemWatcher {
     try {
       const saved = await this.prisma.deletedImage.create({ data: imageItem as any });
       this.broadcast('image', saved);
+
+      const allImgs = await this.prisma.deletedImage.findMany({
+        select: { id: true },
+        orderBy: { deletedAt: 'desc' },
+      });
+      if (allImgs.length > 100) {
+        const toDelete = allImgs.slice(100).map((i) => i.id);
+        await this.prisma.deletedImage.deleteMany({ where: { id: { in: toDelete } } });
+      }
     } catch (e) {
       this.broadcast('image', imageItem);
     }
