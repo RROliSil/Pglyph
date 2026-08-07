@@ -30,3 +30,44 @@ model SystemInfo {
   value     String
   updatedAt DateTime @updatedAt
 }
+
+enum ContentType {
+  TEXT
+  CODE
+  URL
+  SECRET
+}
+
+model ClipboardItem {
+  id            String      @id @default(uuid())
+  content       String      @db.Text
+  contentType   ContentType @default(TEXT)
+  charCount     Int
+  isPinned      Boolean     @default(false)
+  restoredCount Int         @default(0)
+  createdAt     DateTime    @default(now())
+}
+
+model DeletedImage {
+  id           String   @id @default(uuid())
+  fileName     String
+  originalPath String
+  fileSize     String
+  previewUrl   String   @db.Text
+  category     String
+  deletedAt    DateTime @default(now())
+  isRestored   Boolean  @default(false)
+  restoredAt   DateTime?
+}
+
+model AccessedLink {
+  id            String   @id @default(uuid())
+  url           String   @db.Text
+  title         String
+  domain        String
+  favicon       String
+  category      String
+  visitCount    Int      @default(1)
+  isBookmarked  Boolean  @default(false)
+  lastVisitedAt DateTime @default(now())
+}
