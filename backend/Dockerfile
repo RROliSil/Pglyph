@@ -29,4 +29,4 @@ EXPOSE 5000
 ENV PORT=5000 \
     NODE_ENV=production
 
-CMD ["sh", "-c", "npx prisma db push && npm start"]
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss && npm start"]

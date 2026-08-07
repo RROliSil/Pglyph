@@ -33,7 +33,66 @@ let memoryClipboard = generateSeedClipboard();
 let memoryImages = generateSeedImages();
 let memoryLinks = generateSeedLinks();
 
+async function autoMigrateDatabase() {
+  try {
+    console.log('🔄 [DB Auto-Migrate] Verificando e criando tabelas do Pglyph no banco PostgreSQL...');
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+          CREATE TYPE "ContentType" AS ENUM ('TEXT', 'CODE', 'URL', 'SECRET');
+      EXCEPTION
+          WHEN duplicate_object THEN null;
+      END $$;
+    `);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "ClipboardItem" (
+          "id" TEXT NOT NULL PRIMARY KEY,
+          "content" TEXT NOT NULL,
+          "contentType" "ContentType" NOT NULL DEFAULT 'TEXT',
+          "charCount" INTEGER NOT NULL,
+          "isPinned" BOOLEAN NOT NULL DEFAULT false,
+          "restoredCount" INTEGER NOT NULL DEFAULT 0,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "DeletedImage" (
+          "id" TEXT NOT NULL PRIMARY KEY,
+          "fileName" TEXT NOT NULL,
+          "originalPath" TEXT NOT NULL,
+          "fileSize" TEXT NOT NULL,
+          "previewUrl" TEXT NOT NULL,
+          "category" TEXT NOT NULL,
+          "deletedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "isRestored" BOOLEAN NOT NULL DEFAULT false,
+          "restoredAt" TIMESTAMP(3)
+      );
+    `);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "AccessedLink" (
+          "id" TEXT NOT NULL PRIMARY KEY,
+          "url" TEXT NOT NULL,
+          "title" TEXT NOT NULL,
+          "domain" TEXT NOT NULL,
+          "favicon" TEXT NOT NULL,
+          "category" TEXT NOT NULL,
+          "visitCount" INTEGER NOT NULL DEFAULT 1,
+          "isBookmarked" BOOLEAN NOT NULL DEFAULT false,
+          "lastVisitedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log('✅ [DB Auto-Migrate] Estrutura de tabelas do Pglyph criada/verificada com sucesso no PostgreSQL!');
+  } catch (err) {
+    console.warn('⚠️ Erro na migração automática de tabelas PostgreSQL:', err instanceof Error ? err.message : err);
+  }
+}
+
 async function ensureSeeded() {
+  await autoMigrateDatabase();
+
   try {
     const clipCount = await prisma.clipboardItem.count();
     if (clipCount === 0) {
