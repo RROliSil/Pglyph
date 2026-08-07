@@ -15,58 +15,69 @@ const fs = require('fs');
 const os = require('os');
 
 const API_HOST = process.env.PGLYPH_API_HOST || 'localhost';
-const API_PORT = process.env.PGLYPH_API_PORT || 5000;
+const PORTS_TO_TRY = [5001, 8080, 5000];
 
+let activePort = parseInt(process.env.PGLYPH_API_PORT, 10) || 5001;
 let lastClipboardText = '';
 
 console.log('====================================================');
 console.log('⚡ PGLYPH RESTORER - AGENTE AUTOMÁTICO DE BANDEJA DO WINDOWS');
 console.log('====================================================');
-console.log(`🌐 Conectando à API Pglyph em: http://${API_HOST}:${API_PORT}/api`);
-console.log('📡 Monitorando CTRL+C global e arquivos deletados do PC...\n');
+console.log(`🌐 Tentando conectar à API Pglyph em: http://${API_HOST}:${activePort}/api`);
+console.log('📡 Monitorando CTRL+C global e arquivos deletados do PC em tempo real...\n');
 
 // 1. MONITORAMENTO DO CTRL+C GLOBAL DO WINDOWS
 function pollSystemClipboard() {
-  // Executa o comando nativo do PowerShell para obter a área de transferência do Windows
   exec('powershell -command "Get-Clipboard"', { encoding: 'utf8' }, (err, stdout) => {
     if (!err && stdout) {
       const text = stdout.trim();
       if (text && text !== lastClipboardText && text.length > 0 && text.length < 50000) {
         lastClipboardText = text;
-        console.log(`[CTRL+C DETECTADO] "${text.substring(0, 40)}${text.length > 40 ? '...' : ''}"`);
+        console.log(`[CTRL+C DETECTADO NO WINDOWS] "${text.substring(0, 40)}${text.length > 40 ? '...' : ''}"`);
         sendToBackend('/api/clipboard', { content: text });
       }
     }
   });
 }
 
-// 2. FUNÇÃO PARA ENVIAR DADOS AO BACKEND DO PGLYPH
+// 2. ENVO RESILIENTE COM TENTATIVA EM MÚLTIPLAS PORTAS (5001, 8080, 5000)
 function sendToBackend(endpoint, payload) {
   const data = JSON.stringify(payload);
-  const req = http.request(
-    {
-      hostname: API_HOST,
-      port: API_PORT,
-      path: endpoint,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data),
+
+  const attemptSend = (portIndex) => {
+    if (portIndex >= PORTS_TO_TRY.length) return;
+    const port = PORTS_TO_TRY[portIndex];
+
+    const req = http.request(
+      {
+        hostname: API_HOST,
+        port: port,
+        path: endpoint,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data),
+        },
       },
-    },
-    (res) => {
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        console.log(`  ✓ Sincronizado com o Pglyph Backend (${endpoint})`);
+      (res) => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          activePort = port;
+          console.log(`  ✓ Sincronizado com Pglyph Server na porta ${port} (${endpoint})`);
+        } else {
+          attemptSend(portIndex + 1);
+        }
       }
-    }
-  );
+    );
 
-  req.on('error', () => {
-    // Backend indisponível temporariamente
-  });
+    req.on('error', () => {
+      attemptSend(portIndex + 1);
+    });
 
-  req.write(data);
-  req.end();
+    req.write(data);
+    req.end();
+  };
+
+  attemptSend(0);
 }
 
 // 3. MONITORAMENTO DE IMAGENS NA LIXEIRA / PASTAS DE MÍDIA
@@ -80,7 +91,6 @@ function monitorDeletedImages() {
 
   const knownFiles = new Set();
 
-  // Mapeia os arquivos existentes
   watchDirs.forEach((dir) => {
     if (fs.existsSync(dir)) {
       try {
@@ -89,14 +99,12 @@ function monitorDeletedImages() {
     }
   });
 
-  // Checa varreduras a cada 10 segundos
   setInterval(() => {
     watchDirs.forEach((dir) => {
       if (fs.existsSync(dir)) {
         try {
           const currentFiles = new Set(fs.readdirSync(dir).map((f) => path.join(dir, f)));
           
-          // Verifica se algum arquivo conhecido sumiu (foi deletado)
           for (const oldFile of knownFiles) {
             if (!currentFiles.has(oldFile) && oldFile.startsWith(dir)) {
               const ext = path.extname(oldFile).toLowerCase();
@@ -113,7 +121,6 @@ function monitorDeletedImages() {
             }
           }
 
-          // Atualiza lista de arquivos conhecidos
           currentFiles.forEach((f) => knownFiles.add(f));
         } catch (e) {}
       }
@@ -122,5 +129,5 @@ function monitorDeletedImages() {
 }
 
 // Inicializa os loops de captura contínua
-setInterval(pollSystemClipboard, 1500);
+setInterval(pollSystemClipboard, 1200);
 monitorDeletedImages();

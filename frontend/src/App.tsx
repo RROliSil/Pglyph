@@ -27,25 +27,31 @@ export const App: React.FC = () => {
 
     try {
       const resClip = await fetch('/api/clipboard').then((r) => r.json()).catch(() => null);
-      if (Array.isArray(resClip) && resClip.length > 0) {
-        setClipboardItems(resClip);
-        connected = true;
+      if (Array.isArray(resClip)) {
+        if (resClip.length > 0) {
+          setClipboardItems(resClip);
+          connected = true;
+        }
       }
     } catch (e) {}
 
     try {
       const resImg = await fetch('/api/images').then((r) => r.json()).catch(() => null);
-      if (Array.isArray(resImg) && resImg.length > 0) {
-        setDeletedImages(resImg);
-        connected = true;
+      if (Array.isArray(resImg)) {
+        if (resImg.length > 0) {
+          setDeletedImages(resImg);
+          connected = true;
+        }
       }
     } catch (e) {}
 
     try {
       const resLnk = await fetch('/api/links').then((r) => r.json()).catch(() => null);
-      if (Array.isArray(resLnk) && resLnk.length > 0) {
-        setAccessedLinks(resLnk);
-        connected = true;
+      if (Array.isArray(resLnk)) {
+        if (resLnk.length > 0) {
+          setAccessedLinks(resLnk);
+          connected = true;
+        }
       }
     } catch (e) {}
 
@@ -75,15 +81,27 @@ export const App: React.FC = () => {
       });
       const data = await res.json();
       setClipboardItems((prev) => {
-        // Evita duplicata se já estiver no topo
         if (prev.length > 0 && prev[0].content === content) return prev;
         return [data, ...prev].slice(0, 100);
       });
       showToast('⚡ CTRL+C Capturado e registrado automaticamente!');
-    } catch (e) {}
+    } catch (e) {
+      // Fallback local imediato
+      const localItem: ClipboardItem = {
+        id: `clip-auto-${Date.now()}`,
+        content,
+        contentType: content.startsWith('http') ? 'URL' : content.includes(';') || content.includes('{') ? 'CODE' : 'TEXT',
+        charCount: content.length,
+        isPinned: false,
+        restoredCount: 0,
+        createdAt: new Date().toISOString(),
+      };
+      setClipboardItems((prev) => [localItem, ...prev].slice(0, 100));
+      showToast('⚡ CTRL+C Capturado localmente!');
+    }
   }, []);
 
-  // --- ESCUTADOR AUTOMÁTICO DE CTRL+C E CLIPBOARD ---
+  // --- ESCUTADOR AUTOMÁTICO DE CTRL+C, CTRL+V E CLIPBOARD UNIVERSAL ---
   useEffect(() => {
     const handleGlobalCopy = (e: ClipboardEvent) => {
       const selection = window.getSelection()?.toString();
@@ -92,6 +110,13 @@ export const App: React.FC = () => {
       } else if (e.clipboardData) {
         const text = e.clipboardData.getData('text');
         if (text) sendAutoClipboard(text);
+      }
+    };
+
+    const handleGlobalPaste = (e: ClipboardEvent) => {
+      const pastedText = e.clipboardData?.getData('text');
+      if (pastedText && pastedText.trim()) {
+        sendAutoClipboard(pastedText);
       }
     };
 
@@ -111,10 +136,12 @@ export const App: React.FC = () => {
     };
 
     window.addEventListener('copy', handleGlobalCopy);
+    window.addEventListener('paste', handleGlobalPaste);
     window.addEventListener('keydown', handleKeyDown);
 
     return () => {
       window.removeEventListener('copy', handleGlobalCopy);
+      window.removeEventListener('paste', handleGlobalPaste);
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [sendAutoClipboard]);
