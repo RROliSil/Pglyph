@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { PglyphLogo } from './components/PglyphLogo';
 import { ClipboardRestorer, ClipboardItem } from './components/ClipboardRestorer';
 import { ImagesRestorer, DeletedImage } from './components/ImagesRestorer';
@@ -36,7 +36,7 @@ export const App: React.FC = () => {
       if (Array.isArray(resLnk)) setAccessedLinks(resLnk);
 
       if (resHealth.status === 'ok') {
-        setApiHealth('Backend + PostgreSQL Ativos');
+        setApiHealth('Auto-Capture Engine Online');
       } else {
         setApiHealth('Modo Local Híbrido');
       }
@@ -45,8 +45,116 @@ export const App: React.FC = () => {
     }
   };
 
+  // --- Função para gravar novo CTRL+C no backend ---
+  const sendAutoClipboard = useCallback(async (content: string) => {
+    if (!content || !content.trim()) return;
+
+    try {
+      const res = await fetch('/api/clipboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const data = await res.json();
+      setClipboardItems((prev) => {
+        // Evita duplicata se já estiver no topo
+        if (prev.length > 0 && prev[0].content === content) return prev;
+        return [data, ...prev].slice(0, 100);
+      });
+      showToast('⚡ CTRL+C Capturado e registrado automaticamente!');
+    } catch (e) {}
+  }, []);
+
+  // --- ESCUTADOR AUTOMÁTICO DE CTRL+C E CLIPBOARD ---
+  useEffect(() => {
+    const handleGlobalCopy = (e: ClipboardEvent) => {
+      const selection = window.getSelection()?.toString();
+      if (selection && selection.trim()) {
+        sendAutoClipboard(selection);
+      } else if (e.clipboardData) {
+        const text = e.clipboardData.getData('text');
+        if (text) sendAutoClipboard(text);
+      }
+    };
+
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+        setTimeout(async () => {
+          try {
+            if (navigator.clipboard) {
+              const text = await navigator.clipboard.readText();
+              if (text && text.trim()) {
+                sendAutoClipboard(text);
+              }
+            }
+          } catch (err) {}
+        }, 150);
+      }
+    };
+
+    window.addEventListener('copy', handleGlobalCopy);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('copy', handleGlobalCopy);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [sendAutoClipboard]);
+
+  // --- ESCUTADOR AUTOMÁTICO DE LINKS ACESSADOS ---
+  useEffect(() => {
+    const handleAnchorClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement).closest('a');
+      if (target && target.href && !target.href.startsWith('javascript:')) {
+        const url = target.href;
+        const title = target.innerText || target.getAttribute('title') || target.href;
+
+        fetch('/api/links', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, title, category: 'Navegação ao Vivo' }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            setAccessedLinks((prev) => [data, ...prev].slice(0, 100));
+            showToast('🔗 Link acessado registrado de imediato!');
+          })
+          .catch(() => {});
+      }
+    };
+
+    document.addEventListener('click', handleAnchorClick);
+    return () => document.removeEventListener('click', handleAnchorClick);
+  }, []);
+
+  // --- STREAM SSE EM TEMPO REAL COM O BACKEND ---
   useEffect(() => {
     fetchAllData();
+
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource('/api/stream');
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'clipboard' && data.payload) {
+            setClipboardItems((prev) => [data.payload, ...prev.filter((i) => i.id !== data.payload.id)].slice(0, 100));
+            showToast('⚡ Novo CTRL+C sincronizado ao vivo!');
+          } else if (data.type === 'image' && data.payload) {
+            setDeletedImages((prev) => [data.payload, ...prev.filter((i) => i.id !== data.payload.id)].slice(0, 100));
+            showToast('🗑️ Imagem excluída do PC capturada automaticamente!');
+          } else if (data.type === 'link' && data.payload) {
+            setAccessedLinks((prev) => [data.payload, ...prev.filter((i) => i.id !== data.payload.id)].slice(0, 100));
+            showToast('🔗 Novo link acessado registrado no histórico!');
+          }
+        } catch (e) {}
+      };
+    } catch (e) {}
+
+    return () => {
+      if (eventSource) eventSource.close();
+    };
   }, []);
 
   // --- Handlers de Ação: CTRL+C ---
@@ -95,7 +203,7 @@ export const App: React.FC = () => {
       });
       const data = await res.json();
       setClipboardItems((prev) => [data, ...prev].slice(0, 100));
-      showToast('📥 Nova cópia gravada no topo dos 100 itens!');
+      showToast('📥 Cópia gravada no topo dos 100 itens!');
     } catch (e) {
       const newItem: ClipboardItem = {
         id: `clip-loc-${Date.now()}`,
@@ -107,7 +215,7 @@ export const App: React.FC = () => {
         createdAt: new Date().toISOString(),
       };
       setClipboardItems((prev) => [newItem, ...prev].slice(0, 100));
-      showToast('📥 Nova cópia gravada no topo!');
+      showToast('📥 Cópia gravada no topo!');
     }
   };
 
@@ -134,6 +242,13 @@ export const App: React.FC = () => {
   // --- Handlers de Ação: Links Acessados ---
   const handleOpenLink = (url: string) => {
     window.open(url, '_blank');
+
+    fetch('/api/links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, category: 'Guia Restaurada' }),
+    }).catch(() => {});
+
     showToast('🚀 Guia restaurada e aberta em nova aba!');
   };
 
@@ -168,7 +283,6 @@ export const App: React.FC = () => {
     } catch (e) {}
   };
 
-  // --- Re-seed completo ---
   const handleTriggerSeed = async () => {
     try {
       await fetch('/api/seed', { method: 'POST' });
@@ -247,9 +361,9 @@ export const App: React.FC = () => {
 
         {/* Right Status Badge & Reset */}
         <div className="flex items-center gap-3">
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-slate-300">{apiHealth}</span>
+          <div className="hidden sm:flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-mono">
+            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+            <span className="font-bold">{apiHealth}</span>
           </div>
 
           <button
@@ -343,13 +457,13 @@ export const App: React.FC = () => {
 
       {/* Footer */}
       <footer className="border-t border-slate-800/80 bg-[#121319] px-4 py-4 text-center text-xs text-slate-500 font-mono">
-        Pglyph Restaurador Digital • React + Vite + TypeScript + Node.js + Express + Prisma ORM + PostgreSQL
+        Pglyph Restaurador Digital • Captura Automática em Tempo Real (CTRL+C, Lixeira & Links)
       </footer>
 
       {/* Toast Notification Banner */}
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 bg-slate-900 border border-cyan-500/50 text-slate-100 px-5 py-3.5 rounded-2xl shadow-[0_10px_30px_rgba(0,0,0,0.5)] flex items-center gap-3 animate-bounce">
-          <span className="text-cyan-400 text-lg">💡</span>
+          <span className="text-cyan-400 text-lg">⚡</span>
           <span className="text-xs font-semibold">{toastMessage}</span>
           <button
             onClick={() => setToastMessage(null)}

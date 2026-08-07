@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { generateSeedClipboard, generateSeedImages, generateSeedLinks } from './seedData';
+import { SystemWatcher } from './systemWatcher';
 
 dotenv.config();
 
@@ -13,12 +14,25 @@ const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Helper de fallback em memória se o banco ainda não estiver populado
+// Lista de clientes conectados ao Server-Sent Events (SSE) para atualização em tempo real
+let sseClients: Response[] = [];
+
+function broadcastEvent(type: 'clipboard' | 'image' | 'link', payload: any) {
+  const data = JSON.stringify({ type, payload, timestamp: new Date().toISOString() });
+  sseClients.forEach((client) => {
+    client.write(`data: ${data}\n\n`);
+  });
+}
+
+// Inicializa o monitoramento automático de imagens deletadas no PC
+const systemWatcher = new SystemWatcher(prisma, broadcastEvent);
+systemWatcher.start();
+
+// Fallback de memória
 let memoryClipboard = generateSeedClipboard();
 let memoryImages = generateSeedImages();
 let memoryLinks = generateSeedLinks();
 
-// Função para auto-popular o banco PostgreSQL via Prisma
 async function ensureSeeded() {
   try {
     const clipCount = await prisma.clipboardItem.count();
@@ -86,13 +100,25 @@ async function ensureSeeded() {
   }
 }
 
-// Inicializa a verificação de semente
 ensureSeeded();
 
-// --- 1. ENDPOINTS DA ÁREA DE TRANSFERÊNCIA (CTRL+C) ---
+// --- STREAM SSE EM TEMPO REAL ---
+app.get('/api/stream', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
 
-// Listar os últimos 100 itens copiados no CTRL+C
-app.get('/api/clipboard', async (req: Request, res: Response) => {
+  sseClients.push(res);
+  console.log(`🔌 [SSE] Novo cliente conectado em tempo real. Total: ${sseClients.length}`);
+
+  req.on('close', () => {
+    sseClients = sseClients.filter((c) => c !== res);
+  });
+});
+
+// --- 1. ENDPOINTS DA ÁREA DE TRANSFERÊNCIA (CTRL+C AUTOMÁTICO) ---
+
+app.get('/api/clipboard', async (_req: Request, res: Response) => {
   try {
     const items = await prisma.clipboardItem.findMany({
       take: 100,
@@ -101,23 +127,21 @@ app.get('/api/clipboard', async (req: Request, res: Response) => {
     if (items.length > 0) {
       return res.json(items);
     }
-  } catch (e) {
-    // Fallback para memória se o banco estiver sincronizando
-  }
+  } catch (e) {}
   res.json(memoryClipboard.slice(0, 100));
 });
 
-// Adicionar novo item copiado no CTRL+C
+// Captura automática instantânea do CTRL+C
 app.post('/api/clipboard', async (req: Request, res: Response) => {
   const { content, contentType } = req.body;
-  if (!content) {
+  if (!content || typeof content !== 'string') {
     return res.status(400).json({ error: 'Conteúdo é obrigatório' });
   }
 
   const newItem = {
-    id: `clip-custom-${Date.now()}`,
+    id: `clip-auto-${Date.now()}`,
     content,
-    contentType: contentType || 'TEXT',
+    contentType: contentType || (content.startsWith('http') ? 'URL' : content.includes(';') || content.includes('{') ? 'CODE' : 'TEXT'),
     charCount: content.length,
     isPinned: false,
     restoredCount: 0,
@@ -135,14 +159,15 @@ app.post('/api/clipboard', async (req: Request, res: Response) => {
       },
     });
     memoryClipboard.unshift(saved as any);
+    broadcastEvent('clipboard', saved);
     return res.status(201).json(saved);
   } catch (e) {
     memoryClipboard.unshift(newItem as any);
+    broadcastEvent('clipboard', newItem);
     return res.status(201).json(newItem);
   }
 });
 
-// Restaurar item no CTRL+C (incrementa contador de restauração)
 app.post('/api/clipboard/:id/restore', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -161,7 +186,6 @@ app.post('/api/clipboard/:id/restore', async (req: Request, res: Response) => {
   }
 });
 
-// Alternar fixado (isPinned)
 app.put('/api/clipboard/:id/pin', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -183,7 +207,6 @@ app.put('/api/clipboard/:id/pin', async (req: Request, res: Response) => {
   res.status(404).json({ error: 'Item não encontrado' });
 });
 
-// Remover item do histórico
 app.delete('/api/clipboard/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -196,8 +219,7 @@ app.delete('/api/clipboard/:id', async (req: Request, res: Response) => {
 
 // --- 2. ENDPOINTS DE IMAGENS DELETADAS ---
 
-// Listar as últimas 100 imagens deletadas
-app.get('/api/images', async (req: Request, res: Response) => {
+app.get('/api/images', async (_req: Request, res: Response) => {
   try {
     const images = await prisma.deletedImage.findMany({
       take: 100,
@@ -206,13 +228,10 @@ app.get('/api/images', async (req: Request, res: Response) => {
     if (images.length > 0) {
       return res.json(images);
     }
-  } catch (e) {
-    // Fallback
-  }
+  } catch (e) {}
   res.json(memoryImages.slice(0, 100));
 });
 
-// Restaurar imagem deletada no PC
 app.post('/api/images/:id/restore', async (req: Request, res: Response) => {
   const { id } = req.params;
   const now = new Date();
@@ -233,7 +252,6 @@ app.post('/api/images/:id/restore', async (req: Request, res: Response) => {
   }
 });
 
-// Excluir permanentemente
 app.delete('/api/images/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -244,10 +262,9 @@ app.delete('/api/images/:id', async (req: Request, res: Response) => {
   res.json({ message: 'Imagem excluída permanentemente' });
 });
 
-// --- 3. ENDPOINTS DE LINKS ACESSADOS ---
+// --- 3. ENDPOINTS DE LINKS ACESSADOS (NAVEGAÇÃO AUTOMÁTICA) ---
 
-// Listar os últimos 100 links acessados
-app.get('/api/links', async (req: Request, res: Response) => {
+app.get('/api/links', async (_req: Request, res: Response) => {
   try {
     const links = await prisma.accessedLink.findMany({
       take: 100,
@@ -256,13 +273,11 @@ app.get('/api/links', async (req: Request, res: Response) => {
     if (links.length > 0) {
       return res.json(links);
     }
-  } catch (e) {
-    // Fallback
-  }
+  } catch (e) {}
   res.json(memoryLinks.slice(0, 100));
 });
 
-// Adicionar ou registrar acesso a um link
+// Registro imediato de navegação de link
 app.post('/api/links', async (req: Request, res: Response) => {
   const { url, title, category } = req.body;
   if (!url) {
@@ -277,12 +292,12 @@ app.post('/api/links', async (req: Request, res: Response) => {
 
   const favicon = `https://www.google.com/s2/favicons?domain=${domain}&sz=64`;
   const newItem = {
-    id: `link-custom-${Date.now()}`,
+    id: `link-auto-${Date.now()}`,
     url,
     title: title || domain,
     domain,
     favicon,
-    category: category || 'Navegação',
+    category: category || 'Navegação Web',
     visitCount: 1,
     isBookmarked: false,
     lastVisitedAt: new Date(),
@@ -291,14 +306,15 @@ app.post('/api/links', async (req: Request, res: Response) => {
   try {
     const saved = await prisma.accessedLink.create({ data: newItem });
     memoryLinks.unshift(saved as any);
+    broadcastEvent('link', saved);
     return res.status(201).json(saved);
   } catch (e) {
     memoryLinks.unshift(newItem as any);
+    broadcastEvent('link', newItem);
     return res.status(201).json(newItem);
   }
 });
 
-// Alternar favorito (isBookmarked)
 app.put('/api/links/:id/bookmark', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -320,7 +336,6 @@ app.put('/api/links/:id/bookmark', async (req: Request, res: Response) => {
   res.status(404).json({ error: 'Link não encontrado' });
 });
 
-// Remover link do histórico
 app.delete('/api/links/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -331,7 +346,7 @@ app.delete('/api/links/:id', async (req: Request, res: Response) => {
   res.json({ message: 'Link removido do histórico' });
 });
 
-// --- 4. ESTATÍSTICAS E RE-SEED DA APLICAÇÃO ---
+// --- ESTATÍSTICAS E HEALTH ---
 
 app.get('/api/stats', async (_req: Request, res: Response) => {
   let clipCount = memoryClipboard.length;
@@ -351,6 +366,7 @@ app.get('/api/stats', async (_req: Request, res: Response) => {
     imagesTotal: imgCount,
     imagesRestored: restoredImgs,
     linksTotal: linkCount,
+    activeStreamClients: sseClients.length,
     timestamp: new Date().toISOString(),
   });
 });
@@ -370,7 +386,6 @@ app.post('/api/seed', async (_req: Request, res: Response) => {
   res.json({ message: '100 itens gerados com sucesso para cada uma das 3 seções do Pglyph Restaurador!' });
 });
 
-// Endpoint de verificação de saúde da API
 app.get('/api/health', async (_req: Request, res: Response) => {
   try {
     const userCount = await prisma.user.count();
@@ -380,8 +395,8 @@ app.get('/api/health', async (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
       orm: 'Prisma ORM',
-      app: 'Pglyph Restaurador',
-      message: 'API Backend Node.js + Express com Prisma ORM rodando com sucesso!',
+      app: 'Pglyph Restaurador (Auto-Capture Engine)',
+      message: 'API Backend com suporte a captura automática em tempo real ativada!',
       timestamp: new Date().toISOString(),
       userCount,
       clipboardCount: clipCount,
@@ -392,7 +407,7 @@ app.get('/api/health', async (_req: Request, res: Response) => {
       status: 'degraded',
       orm: 'Prisma ORM',
       app: 'Pglyph Restaurador',
-      message: 'API rodando em modo híbrido com fallback de memória ativado...',
+      message: 'API rodando em modo híbrido com fallback de memória...',
       timestamp: new Date().toISOString(),
       error: error instanceof Error ? error.message : 'Erro desconhecido',
     });
@@ -400,5 +415,5 @@ app.get('/api/health', async (_req: Request, res: Response) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Pglyph Restaurador Backend rodando na porta ${PORT}`);
+  console.log(`🚀 Pglyph Restaurador Backend (Auto-Capture Engine) rodando na porta ${PORT}`);
 });
