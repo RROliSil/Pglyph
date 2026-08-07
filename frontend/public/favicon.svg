@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#EDEDF0" />
+      <stop offset="50%" stop-color="#DFE1E6" />
+      <stop offset="100%" stop-color="#CED2D9" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Fundo Quadrado Arredondado Cinza Claro Idêntico à Imagem Anexada -->
+  <rect x="24" y="24" width="464" height="464" rx="88" ry="88" fill="url(#bgGrad)" stroke="#FFFFFF" stroke-width="4" stroke-opacity="0.8" />
+  
+  <!-- Borda interna sutil -->
+  <rect x="36" y="36" width="440" height="440" rx="76" ry="76" fill="none" stroke="#B0B4BC" stroke-opacity="0.4" stroke-width="3" />
+
+  <!-- Glifos e Runas Rúnicas das 3 Linhas da Imagem -->
+  <g fill="#21242A" font-family="'Fira Code', monospace, sans-serif" font-weight="900" text-anchor="middle">
+    <!-- Linha 1 -->
+    <text x="256" y="200" font-size="52" letter-spacing="8">ᚠᚢᚦᚨ ᚱᛟᛁ"X</text>
+    
+    <!-- Linha 2 -->
+    <text x="256" y="275" font-size="52" letter-spacing="8">ᚺᚾᛋᛏCCYS</text>
+    
+    <!-- Linha 3 -->
+    <text x="256" y="350" font-size="52" letter-spacing="8">\XᚠᛘᛏΠ/</text>
+  </g>
+</svg>
