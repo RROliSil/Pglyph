@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
+import Redis from 'ioredis';
 import { PrismaClient } from '@prisma/client';
 import { generateSeedClipboard, generateSeedImages, generateSeedLinks } from './seedData';
 import { SystemWatcher } from './systemWatcher';
@@ -12,6 +13,56 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 const prisma = new PrismaClient();
+
+// Inicialização do Redis Client resiliente com auto-reconexão
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const redis = new Redis(REDIS_URL, {
+  lazyConnect: true,
+  maxRetriesPerRequest: 1,
+  retryStrategy: (times) => Math.min(times * 200, 3000),
+});
+
+redis.on('connect', () => console.log('⚡ [Redis Cache Engine] Conectado ao Redis Key-Value Cache!'));
+redis.on('error', (err) => console.warn('⚠️ [Redis Cache Engine] Modo Redis offline:', err.message));
+
+redis.connect().catch(() => {});
+
+async function getRedisList<T>(key: string): Promise<T[] | null> {
+  try {
+    if (redis.status === 'ready' || redis.status === 'connect') {
+      const cached = await redis.lrange(key, 0, 99);
+      if (cached && cached.length > 0) {
+        return cached.map((item) => JSON.parse(item));
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function pushRedisList(key: string, item: any) {
+  try {
+    if (redis.status === 'ready' || redis.status === 'connect') {
+      await redis.lpush(key, JSON.stringify(item));
+      await redis.ltrim(key, 0, 99);
+    }
+  } catch (e) {}
+}
+
+async function syncRedisList(key: string, items: any[]) {
+  try {
+    if (redis.status === 'ready' || redis.status === 'connect') {
+      await redis.del(key);
+      if (items.length > 0) {
+        const pipeline = redis.pipeline();
+        const reversed = [...items].slice(0, 100).reverse();
+        for (const item of reversed) {
+          pipeline.lpush(key, JSON.stringify(item));
+        }
+        await pipeline.exec();
+      }
+    }
+  } catch (e) {}
+}
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -279,15 +330,23 @@ app.get('/api/stream', (req: Request, res: Response) => {
 // --- 1. ENDPOINTS DA ÁREA DE TRANSFERÊNCIA (CTRL+C AUTOMÁTICO) ---
 
 app.get('/api/clipboard', async (_req: Request, res: Response) => {
+  const cached = await getRedisList<any>('pglyph:clipboard');
+  if (cached && cached.length > 0) {
+    return res.json(cached);
+  }
+
   try {
     const items = await prisma.clipboardItem.findMany({
       take: 100,
       orderBy: { createdAt: 'desc' },
     });
     if (items.length > 0) {
+      await syncRedisList('pglyph:clipboard', items);
       return res.json(items);
     }
   } catch (e) {}
+  
+  await syncRedisList('pglyph:clipboard', memoryClipboard);
   res.json(memoryClipboard.slice(0, 100));
 });
 
@@ -320,11 +379,13 @@ app.post('/api/clipboard', async (req: Request, res: Response) => {
     });
     memoryClipboard = [saved as any, ...memoryClipboard.filter((i: any) => i.id !== saved.id)];
     await pruneClipboard();
+    await pushRedisList('pglyph:clipboard', saved);
     broadcastEvent('clipboard', saved);
     return res.status(201).json(saved);
   } catch (e) {
     memoryClipboard = [newItem as any, ...memoryClipboard.filter((i: any) => i.id !== newItem.id)];
     await pruneClipboard();
+    await pushRedisList('pglyph:clipboard', newItem);
     broadcastEvent('clipboard', newItem);
     return res.status(201).json(newItem);
   }
@@ -337,12 +398,14 @@ app.post('/api/clipboard/:id/restore', async (req: Request, res: Response) => {
       where: { id },
       data: { restoredCount: { increment: 1 } },
     });
+    await syncRedisList('pglyph:clipboard', memoryClipboard);
     return res.json(updated);
   } catch (e) {
     const idx = memoryClipboard.findIndex((item) => item.id === id);
     if (idx !== -1) {
       memoryClipboard[idx].restoredCount += 1;
       saveLocalFile(CLIP_FILE, memoryClipboard);
+      await syncRedisList('pglyph:clipboard', memoryClipboard);
       return res.json(memoryClipboard[idx]);
     }
     return res.status(404).json({ error: 'Item não encontrado' });
@@ -358,6 +421,7 @@ app.put('/api/clipboard/:id/pin', async (req: Request, res: Response) => {
         where: { id },
         data: { isPinned: !existing.isPinned },
       });
+      await syncRedisList('pglyph:clipboard', memoryClipboard);
       return res.json(updated);
     }
   } catch (e) {
@@ -365,6 +429,7 @@ app.put('/api/clipboard/:id/pin', async (req: Request, res: Response) => {
     if (idx !== -1) {
       memoryClipboard[idx].isPinned = !memoryClipboard[idx].isPinned;
       saveLocalFile(CLIP_FILE, memoryClipboard);
+      await syncRedisList('pglyph:clipboard', memoryClipboard);
       return res.json(memoryClipboard[idx]);
     }
   }
@@ -378,21 +443,30 @@ app.delete('/api/clipboard/:id', async (req: Request, res: Response) => {
   } catch (e) {}
   memoryClipboard = memoryClipboard.filter((item) => item.id !== id);
   saveLocalFile(CLIP_FILE, memoryClipboard);
+  await syncRedisList('pglyph:clipboard', memoryClipboard);
   res.json({ message: 'Item removido com sucesso' });
 });
 
 // --- 2. ENDPOINTS DE IMAGENS DELETADAS ---
 
 app.get('/api/images', async (_req: Request, res: Response) => {
+  const cached = await getRedisList<any>('pglyph:images');
+  if (cached && cached.length > 0) {
+    return res.json(cached);
+  }
+
   try {
     const images = await prisma.deletedImage.findMany({
       take: 100,
       orderBy: { deletedAt: 'desc' },
     });
     if (images.length > 0) {
+      await syncRedisList('pglyph:images', images);
       return res.json(images);
     }
   } catch (e) {}
+  
+  await syncRedisList('pglyph:images', memoryImages);
   res.json(memoryImages.slice(0, 100));
 });
 
@@ -424,21 +498,30 @@ app.delete('/api/images/:id', async (req: Request, res: Response) => {
   } catch (e) {}
   memoryImages = memoryImages.filter((item) => item.id !== id);
   saveLocalFile(IMG_FILE, memoryImages);
+  await syncRedisList('pglyph:images', memoryImages);
   res.json({ message: 'Imagem excluída permanentemente' });
 });
 
 // --- 3. ENDPOINTS DE LINKS ACESSADOS (NAVEGAÇÃO AUTOMÁTICA) ---
 
 app.get('/api/links', async (_req: Request, res: Response) => {
+  const cached = await getRedisList<any>('pglyph:links');
+  if (cached && cached.length > 0) {
+    return res.json(cached);
+  }
+
   try {
     const links = await prisma.accessedLink.findMany({
       take: 100,
       orderBy: { lastVisitedAt: 'desc' },
     });
     if (links.length > 0) {
+      await syncRedisList('pglyph:links', links);
       return res.json(links);
     }
   } catch (e) {}
+
+  await syncRedisList('pglyph:links', memoryLinks);
   res.json(memoryLinks.slice(0, 100));
 });
 
@@ -472,11 +555,13 @@ app.post('/api/links', async (req: Request, res: Response) => {
     const saved = await prisma.accessedLink.create({ data: newItem });
     memoryLinks = [saved as any, ...memoryLinks.filter((i: any) => i.id !== saved.id)];
     await pruneLinks();
+    await pushRedisList('pglyph:links', saved);
     broadcastEvent('link', saved);
     return res.status(201).json(saved);
   } catch (e) {
     memoryLinks = [newItem as any, ...memoryLinks.filter((i: any) => i.id !== newItem.id)];
     await pruneLinks();
+    await pushRedisList('pglyph:links', newItem);
     broadcastEvent('link', newItem);
     return res.status(201).json(newItem);
   }
@@ -491,6 +576,7 @@ app.put('/api/links/:id/bookmark', async (req: Request, res: Response) => {
         where: { id },
         data: { isBookmarked: !existing.isBookmarked },
       });
+      await syncRedisList('pglyph:links', memoryLinks);
       return res.json(updated);
     }
   } catch (e) {
@@ -498,6 +584,7 @@ app.put('/api/links/:id/bookmark', async (req: Request, res: Response) => {
     if (idx !== -1) {
       memoryLinks[idx].isBookmarked = !memoryLinks[idx].isBookmarked;
       saveLocalFile(LNK_FILE, memoryLinks);
+      await syncRedisList('pglyph:links', memoryLinks);
       return res.json(memoryLinks[idx]);
     }
   }
@@ -511,6 +598,7 @@ app.delete('/api/links/:id', async (req: Request, res: Response) => {
   } catch (e) {}
   memoryLinks = memoryLinks.filter((item) => item.id !== id);
   saveLocalFile(LNK_FILE, memoryLinks);
+  await syncRedisList('pglyph:links', memoryLinks);
   res.json({ message: 'Link removido do histórico' });
 });
 
